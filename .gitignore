@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Data
+data/raw/
+data/processed/
+
+# Results & Checkpoints
+checkpoints/*.pth
+results/samples/
+results/evaluation/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+venv/
+*.egg
+
+# Logs
+wandb/
+runs/
+*.log

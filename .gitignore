@@ -8,6 +8,10 @@ build/
 data/raw/
 data/processed/
 
+# Output
+outputs/base
+outputs/expr
+
 # Results & Checkpoints
 checkpoints/*.pth
 results/samples/

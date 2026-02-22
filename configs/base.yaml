@@ -1,0 +1,49 @@
+# ─── Phase 2 Baseline: Pyramid Pix2Pix (M_base) ───
+# This config is shared with expr.yaml except for the expression-loss section.
+
+data:
+  root_dir: "data/raw"
+  image_size: 256
+  train_crops_per_image: 2      # samples 4 random 256x256 crops per source image each epoch
+  train_crop_mode: "random"     # random crop per sample; use "quadrant_jitter" for forced coverage
+  val_full_resolution: true     # use original resolution in validation
+  eval_full_resolution: true    # use original resolution in eval.py
+  num_workers: 4
+
+model:
+  num_res_blocks: 6
+  in_channels: 3
+  out_channels: 3
+  norm: "batch"
+
+training:
+  batch_size: 8
+  val_batch_size: 1             # full-resolution val is memory-heavy
+  eval_batch_size: 1            # full-resolution eval is memory-heavy
+  lr_G: 0.0002
+  lr_D: 0.0001
+  beta1: 0.5
+  beta2: 0.999
+  epochs: 30
+  lambda_adv: 5
+  lambda_pyr: 30.0
+  pyramid_levels: 3
+  val_every: 5
+  save_every: 10
+  best_metric: "psnr"          # metric used for generator_best.pth
+  save_extra_best_checkpoints: true  # also save metric-specific best checkpoints
+  d_update_every: 2
+  gan_label_real: 1.0
+  gan_label_fake: 0.0
+  gan_label_gen: 1.0
+  checkpoint_dir: "outputs/base"
+  resume: null
+
+expression:
+  enabled: false
+  lambda_expr: 1.5
+  epoch_add_expr: 50          # 50% of 200 epochs
+  od_threshold: 0.15
+  dilate_radius: 2
+
+seed: 42

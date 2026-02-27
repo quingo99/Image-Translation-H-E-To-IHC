@@ -1,13 +1,11 @@
-# ─── Phase 2 Baseline: Pyramid Pix2Pix (M_base) ───
-# This config is shared with expr.yaml except for the expression-loss section.
-
 data:
   root_dir: "data/raw"
   image_size: 256
-  train_crops_per_image: 2      # samples 4 random 256x256 crops per source image each epoch
-  train_crop_mode: "random"     # random crop per sample; use "quadrant_jitter" for forced coverage
-  val_full_resolution: true     # use original resolution in validation
-  eval_full_resolution: true    # use original resolution in eval.py
+  val_image_size: 512
+  train_crops_per_image: 1
+  train_crop_mode: "random"
+  val_full_resolution: false
+  eval_full_resolution: true
   num_workers: 4
 
 model:
@@ -15,23 +13,31 @@ model:
   in_channels: 3
   out_channels: 3
   norm: "batch"
+  norm_G: "instance"
+  norm_D: "none"
+  spectral_norm_D: true
 
 training:
   batch_size: 8
-  val_batch_size: 1             # full-resolution val is memory-heavy
-  eval_batch_size: 1            # full-resolution eval is memory-heavy
+  val_batch_size: 1
+  eval_batch_size: 1
+  val_tiling_mode: "none"
+  val_tile_size: 512
+  val_sample_n: 4
+  val_schedule: "fixed"
+  val_start_epoch: 45
   lr_G: 0.0002
-  lr_D: 0.0001
+  lr_D: 0.0002
   beta1: 0.5
   beta2: 0.999
-  epochs: 30
+  epochs: 100
   lambda_adv: 5
-  lambda_pyr: 30.0
+  lambda_pyr: 25
   pyramid_levels: 3
   val_every: 5
   save_every: 10
-  best_metric: "psnr"          # metric used for generator_best.pth
-  save_extra_best_checkpoints: true  # also save metric-specific best checkpoints
+  best_metric: "lpips"
+  save_extra_best_checkpoints: true
   d_update_every: 2
   gan_label_real: 1.0
   gan_label_fake: 0.0
@@ -41,9 +47,22 @@ training:
 
 expression:
   enabled: false
-  lambda_expr: 1.5
-  epoch_add_expr: 50          # 50% of 200 epochs
+  lambda_expr: 2.2
+  epoch_add_expr: 20
+  warmup_epochs: 0
   od_threshold: 0.15
   dilate_radius: 2
+  min_iod_signal: 200
+  min_miod_signal: 0.001
+  spatial_weight: 0.4
+  spatial_grid_size: 8
+  spatial_min_tissue_frac: 0.1
+  spatial_min_signal: 0.001
+  max_rel_term: 5.0
+  dab_nonnegative: "softplus"
+  softplus_beta: 8.0
+  stain_reference_mode: "batch_median"
+  stain_ref_blend: 0.25
+  stain_min_ref_images: 6
 
 seed: 42

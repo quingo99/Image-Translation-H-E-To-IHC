@@ -26,7 +26,6 @@ def make_summary_table(df_base, df_expr, output_dir):
         "PSNR": "psnr",
         "SSIM": "ssim",
         "LPIPS": "lpips",
-        "DAB Pearson-r": "dab_pearson_r",
         "IOD Rel Err": "iod_rel_err",
         "mIOD Rel Err": "miod_rel_err",
         "Nuclei Density Err": "nuclei_density_error",
@@ -56,11 +55,11 @@ def make_hypothesis_table(df_base, df_expr, output_dir):
     """Table 2: Hypothesis checks."""
     hypotheses = [
         {
-            "Hypothesis": "M_expr improves DAB expression agreement (IOD/mIOD/Pearson-r)",
+            "Hypothesis": "M_expr improves DAB expression agreement (lower mIOD relative error)",
             "Expected": "up",
-            "base_col": "dab_pearson_r",
-            "expr_col": "dab_pearson_r",
-            "higher_is_better": True,
+            "base_col": "miod_rel_err",
+            "expr_col": "miod_rel_err",
+            "higher_is_better": False,
         },
         {
             "Hypothesis": "Membrane structure metrics improve without explicit membrane loss",
@@ -129,7 +128,7 @@ def plot_metric_comparison(df_base, df_expr, output_dir):
         "PSNR": "psnr",
         "SSIM": "ssim",
         "LPIPS": "lpips",
-        "DAB Pearson-r": "dab_pearson_r",
+        "mIOD Rel Err": "miod_rel_err",
     }
 
     fig, axes = plt.subplots(1, len(metrics), figsize=(4 * len(metrics), 5))

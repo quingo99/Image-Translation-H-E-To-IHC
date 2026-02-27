@@ -1,44 +1,43 @@
-# ─── Phase 2 Structured: Pyramid Pix2Pix + Expression Loss (M_expr) ───
-# Identical to base.yaml except expression.enabled = true.
-
 data:
   root_dir: "data/raw"
   image_size: 256
-  train_crops_per_image: 2      # samples 4 jittered 256x256 crops (one per quadrant)
-  train_crop_mode: "random"  # one jittered crop per quadrant when crops/image=4 #if train_crop is not 4, using "random"
-  val_full_resolution: true     # use original resolution in validation
-  eval_full_resolution: true    # use original resolution in eval.py
+  val_image_size: 512
+  train_crops_per_image: 1
+  train_crop_mode: "random"
+  val_full_resolution: false
+  eval_full_resolution: true
   num_workers: 4
 
 model:
   num_res_blocks: 6
   in_channels: 3
   out_channels: 3
-  norm: "instance"
+  norm: "batch"
+  norm_G: "instance"
+  norm_D: "none"
+  spectral_norm_D: true
 
 training:
   batch_size: 8
-  val_batch_size: 1             # full-resolution val is memory-heavy
-  eval_batch_size: 1            # full-resolution eval is memory-heavy
-  val_tiling_mode: "2x2"        # deterministic 4-tile validation over each full image
-  val_tile_size: 512            # tile size for val_tiling_mode="2x2"
-  val_sample_n: 4               # number of rows saved in each validation sample grid
-  val_schedule: "on_train_loss" # validate when train loss_G reaches a new best
-  val_start_epoch: 20           # earliest epoch to allow validation, use "fixed" if you want to validate every n epoch"
-  val_cooldown_epochs: 5        # minimum epochs between validation runs
-  val_loss_min_delta: 0.0       # minimum loss_G improvement to trigger validation
+  val_batch_size: 1
+  eval_batch_size: 1
+  val_tiling_mode: "none"
+  val_tile_size: 512
+  val_sample_n: 4
+  val_schedule: "fixed"
+  val_start_epoch: 45
   lr_G: 0.0002
-  lr_D: 0.0001
+  lr_D: 0.0002
   beta1: 0.5
   beta2: 0.999
   epochs: 100
   lambda_adv: 5
-  lambda_pyr: 30.0
-  pyramid_levels: 3            # S = 3
+  lambda_pyr: 25
+  pyramid_levels: 3
   val_every: 5
-  save_every: 20
-  best_metric: "lpips"         # metric used for generator_best.pth
-  save_extra_best_checkpoints: true  # also save metric-specific best checkpoints
+  save_every: 10
+  best_metric: "expr"
+  save_extra_best_checkpoints: true
   d_update_every: 2
   gan_label_real: 1.0
   gan_label_fake: 0.0
@@ -46,21 +45,24 @@ training:
   checkpoint_dir: "outputs/expr"
   resume: null
 
-
 expression:
   enabled: true
-  lambda_expr: 1.2
-  epoch_add_expr: 40         # start expression supervision after early structure learning
-  warmup_epochs: 20          # linearly ramp lambda_expr over first expression epochs
+  lambda_expr: 2.2
+  epoch_add_expr: 20
+  warmup_epochs: 0
   od_threshold: 0.15
   dilate_radius: 2
-  min_iod_signal: 10.0       # ignore low-signal IOD samples in L_expr
-  min_miod_signal: 0.01      # ignore low-signal mIOD samples in L_expr
-  max_rel_term: 5.0          # cap per-term relative error to limit outliers
+  min_iod_signal: 200
+  min_miod_signal: 0.001
+  spatial_weight: 0.4
+  spatial_grid_size: 8
+  spatial_min_tissue_frac: 0.1
+  spatial_min_signal: 0.001
+  max_rel_term: 5.0
   dab_nonnegative: "softplus"
   softplus_beta: 8.0
-  stain_reference_mode: "batch_avg"  # multi-target reference from current batch
-  stain_ref_blend: 0.25              # blend per-image Macenko with batch reference
-  stain_min_ref_images: 6            # min valid images to build batch reference
+  stain_reference_mode: "batch_median"
+  stain_ref_blend: 0.25
+  stain_min_ref_images: 6
 
 seed: 42

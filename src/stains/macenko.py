@@ -2,6 +2,8 @@
 
 This module estimates per-image stain bases in optical density space and
 extracts DAB concentration maps used by expression losses and metrics.
+
+Also, the deconvolution method is also referred by paper "Multi-target stain normalization for histology slides"
 """
 
 import torch
@@ -23,8 +25,27 @@ DEFAULT_STAIN_MATRIX = torch.tensor(
 
 
 def rgb_to_od(img):
-    """Convert RGB image in [0,1] to optical density."""
-    return -torch.log10(img.clamp(min=EPS))
+    """Convert RGB intensities to optical density.
+
+    Args:
+        img: (3, H, W) or (B, 3, H, W) in [0, 1].
+
+    Returns:
+        OD image with the same shape as input.
+    """
+    if img.ndim == 4:
+        # Batched: (B, 3, H, W)
+        flat = img.reshape(img.shape[0], 3, -1)  # (B, 3, HW)
+        I0 = torch.quantile(flat, 0.99, dim=2).clamp(min=EPS)  # (B, 3)
+        img_norm = (img / I0[..., None, None]).clamp(min=EPS, max=1.0)
+    elif img.ndim == 3:
+        # Single image: (3, H, W)
+        flat = img.reshape(3, -1)
+        I0 = torch.quantile(flat, 0.99, dim=1).clamp(min=EPS)  # (3,)
+        img_norm = (img / I0[:, None, None]).clamp(min=EPS, max=1.0)
+    else:
+        raise ValueError(f"Expected 3D or 4D input, got {img.ndim}D")
+    return -torch.log10(img_norm)
 
 
 def _normalize_columns(V):
@@ -115,11 +136,15 @@ def _estimate_stain_matrix_single(
 
     # 3) SVD: right singular vectors (Vh) are principal directions in OD space.
     #    The first two principal components span the best-fit 2D plane for the data.
+    #    Upcast to float32 for numerical stability (SVD on float16 can be unreliable).
+    svd_input = centered.float() if centered.dtype != torch.float32 else centered
     try:
-        _, _, Vh = torch.linalg.svd(centered, full_matrices=False)
+        _, _, Vh = torch.linalg.svd(svd_input, full_matrices=False)
     except Exception:
         # If SVD fails (rare, but can happen on some dtypes/devices), fall back.
         return None
+    # Cast back to original dtype
+    Vh = Vh.to(dtype=centered.dtype)
 
     # 4) "plane" is a 2x3 matrix whose rows are the top-2 principal directions.
     #    Project each centered pixel onto this 2D coordinate system.
@@ -202,13 +227,13 @@ def _collect_tissue_od_pixels(img_01, od_threshold):
     return od_flat[tissue_mask]
 
 
-def _estimate_reference_from_batch(estimated_list, min_ref_images):
+def _estimate_reference_from_batch(estimated_list, min_ref_images, reference_mode):
     """
-    Build a batch-level reference stain matrix by averaging valid per-image estimates.
+    Build a batch-level reference stain matrix from valid per-image estimates.
 
     Motivation:
       - Per-image Macenko estimates can be noisy or fail for some images.
-      - If enough images in the batch yield valid estimates, averaging them provides
+      - If enough images in the batch yield valid estimates, aggregating them provides
         a more stable reference basis (V_ref) for optional blending or fallback.
 
     Assumptions:
@@ -218,6 +243,7 @@ def _estimate_reference_from_batch(estimated_list, min_ref_images):
     Args:
         estimated_list: list of (3,2) stain matrices or None (failed estimates).
         min_ref_images: minimum number of non-None estimates required to form V_ref.
+        reference_mode: "batch_avg" or "batch_median".
 
     Returns:
         V_ref: (3,2) canonicalized reference stain matrix, or None if insufficient valid images.
@@ -227,8 +253,17 @@ def _estimate_reference_from_batch(estimated_list, min_ref_images):
     if len(valid) < int(min_ref_images):
         return None
 
-    # Average across images (elementwise mean of 3x2 matrices)
-    V_ref = torch.stack(valid, dim=0).mean(dim=0)
+    stacked = torch.stack(valid, dim=0)
+    if reference_mode == "batch_avg":
+        # Average across images (elementwise mean of 3x2 matrices)
+        V_ref = stacked.mean(dim=0)
+    elif reference_mode == "batch_median":
+        # element-wise median across images (more robust than mean)
+        V_ref = stacked.median(dim=0).values  # (3, 2)
+    else:
+        raise ValueError(
+            "reference_mode must be one of {'batch_avg', 'batch_median'}."
+        )
 
     # Canonicalize again (fix any small drift; ensures [H, DAB] convention)
     return _canonicalize_stain_matrix(V_ref)
@@ -237,10 +272,10 @@ def _estimate_reference_from_batch(estimated_list, min_ref_images):
 def estimate_stain_matrix(
     y_01,
     od_threshold=0.15,
-    reference_mode="none",
+    reference_mode="batch_avg",
     ref_matrix=None,
     ref_blend=0.0,
-    min_ref_images=4,
+    min_ref_images=6,
 ):
     """
     Estimate a 3x2 stain matrix V for each image in a batch.
@@ -253,6 +288,7 @@ def estimate_stain_matrix(
       3) Optionally build or use a reference stain basis V_ref:
          - "none": no reference (pure per-image or fallback).
          - "batch_avg": average valid per-image estimates in this batch -> V_ref.
+         - "batch_median": median valid per-image estimates in this batch -> V_ref.
          - "provided": user passes an explicit ref_matrix -> V_ref.
       4) For each image:
          - If estimation failed -> use V_ref if available else DEFAULT fallback.
@@ -264,6 +300,7 @@ def estimate_stain_matrix(
         reference_mode:
             "none"      -> per-image Macenko; fallback to DEFAULT when needed.
             "batch_avg" -> compute V_ref by averaging valid per-image estimates in batch.
+            "batch_median" -> compute V_ref by median over valid per-image estimates.
             "provided"  -> use the given ref_matrix as V_ref.
         ref_matrix: optional (3,2) reference stain matrix used when reference_mode="provided".
         ref_blend: float in [0,1]. If >0 and V_ref exists:
@@ -271,14 +308,16 @@ def estimate_stain_matrix(
             - 0.0 => use per-image only
             - 1.0 => force reference only (for images with valid estimate too)
         min_ref_images: minimum number of valid per-image estimates required to form V_ref
-            in "batch_avg" mode.
+            in "batch_avg" and "batch_median" modes.
 
     Returns:
         V_out: list of length B, each element is a (3,2) stain matrix [H, DAB].
     """
     # Validate options
-    if reference_mode not in {"none", "batch_avg", "provided"}:
-        raise ValueError("reference_mode must be one of {'none', 'batch_avg', 'provided'}")
+    if reference_mode not in {"none", "batch_avg", "batch_median", "provided"}:
+        raise ValueError(
+            "reference_mode must be one of {'none', 'batch_avg', 'batch_median', 'provided'}"
+        )
     if not (0.0 <= float(ref_blend) <= 1.0):
         raise ValueError("ref_blend must be in [0, 1].")
 
@@ -304,9 +343,11 @@ def estimate_stain_matrix(
         # Canonicalize reference to ensure [H, DAB] and consistent signs
         V_ref = _canonicalize_stain_matrix(ref_matrix.to(device=device, dtype=dtype))
 
-    elif reference_mode == "batch_avg":
+    elif reference_mode in {"batch_avg", "batch_median"}:
         # Build a robust reference from this batch if enough images estimated successfully
-        V_ref = _estimate_reference_from_batch(estimated, min_ref_images)
+        V_ref = _estimate_reference_from_batch(estimated, min_ref_images, reference_mode)
+
+
 
     # 3) Produce final per-image matrices with fallback/blending
     V_out = []
@@ -327,7 +368,7 @@ def estimate_stain_matrix(
     return V_out
 
 
-def get_dab_map(img_01, V, nonnegative="clamp", softplus_beta=10.0):
+def get_dab_map(img_01, V, nonnegative="softplus", softplus_beta=10.0):
     """
     Compute the per-pixel DAB "concentration" map via linear color deconvolution.
 
@@ -414,7 +455,8 @@ def tissue_mask_from_od(y_01, od_threshold=0.15, dilate_radius=3):
         r = int(dilate_radius)
 
         # Ones kernel acts like a neighborhood "OR" after thresholding (>0).
-        kernel = torch.ones(1, 1, 2 * r + 1, 2 * r + 1, device=y_01.device)
+        # Match dtype of the mask to avoid dtype mismatch in conv2d.
+        kernel = torch.ones(1, 1, 2 * r + 1, 2 * r + 1, device=y_01.device, dtype=mask.dtype)
 
         # conv2d expects (N, C, H, W), so add a channel dimension.
         mask_4d = mask.unsqueeze(1)  # (B, 1, H, W)
@@ -423,4 +465,3 @@ def tissue_mask_from_od(y_01, od_threshold=0.15, dilate_radius=3):
         mask = (F.conv2d(mask_4d, kernel, padding=r) > 0).squeeze(1).float()  # (B,H,W)
 
     return mask
-

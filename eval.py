@@ -41,6 +41,24 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
+def load_checkpoint_model_config(checkpoint_path):
+    """Load model config saved with the training run, if present.
+
+    Training saves a config.yaml next to each checkpoint. Reading it here
+    ensures we reconstruct the Generator with the exact same architecture
+    that was used during training, even if the eval config differs.
+    """
+    run_cfg_path = Path(checkpoint_path).parent / "config.yaml"
+    if not run_cfg_path.exists():
+        return None
+    with open(run_cfg_path) as f:
+        run_cfg = yaml.safe_load(f) or {}
+    if not isinstance(run_cfg, dict):
+        return None
+    model_cfg = run_cfg.get("model")
+    return model_cfg if isinstance(model_cfg, dict) else None
+
+
 def save_sample_triplet(he, real, fake, fname, path):
     """Save one sample as a 3-panel image: H&E, real IHC, generated IHC."""
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
@@ -68,12 +86,31 @@ def evaluate(cfg, checkpoint_path):
     sample_dir = os.path.join(eval_dir, "samples")
     os.makedirs(sample_dir, exist_ok=True)
 
-    # Load model
+    # Load model — override eval config with the architecture settings that were
+    # actually used during training to guarantee weight shapes match.
+    model_cfg = dict(cfg["model"])
+    checkpoint_model_cfg = load_checkpoint_model_config(checkpoint_path)
+    if checkpoint_model_cfg:
+        keys_to_sync = (
+            "in_channels",
+            "out_channels",
+            "num_res_blocks",
+            "norm",
+            "norm_G",
+            "norm_D",
+        )
+        for key in keys_to_sync:
+            if key in checkpoint_model_cfg:
+                model_cfg[key] = checkpoint_model_cfg[key]
+
+    model_norm_default = model_cfg.get("norm", "instance")
+    model_norm_g = model_cfg.get("norm_G", model_norm_default)
+    print(f"Generator normalization for eval: {model_norm_g}")
     G = Generator(
-        in_channels=cfg["model"]["in_channels"],
-        out_channels=cfg["model"]["out_channels"],
-        num_res_blocks=cfg["model"]["num_res_blocks"],
-        norm_type=cfg["model"].get("norm", "instance"),
+        in_channels=model_cfg["in_channels"],
+        out_channels=model_cfg["out_channels"],
+        num_res_blocks=model_cfg["num_res_blocks"],
+        norm_type=model_norm_g,
     ).to(device)
     G.load_state_dict(torch.load(checkpoint_path, map_location=device))
     G.eval()
@@ -89,7 +126,8 @@ def evaluate(cfg, checkpoint_path):
     if eval_batch_size < 1:
         raise ValueError("training.eval_batch_size must be >= 1")
 
-    # Evaluation data: try test first, then val fallback
+    # Evaluation data: prefer the test split when IHC ground truth is available.
+    # The BCI test set ships without IHC labels, so we fall back to val in that case.
     eval_split = "test"
     try:
         test_ds = BCIDataset(
@@ -129,6 +167,16 @@ def evaluate(cfg, checkpoint_path):
     if lpips_model is None:
         print("WARNING: `lpips` is not installed. LPIPS values will be NaN.")
 
+    # DAB/structure metric settings: use expression config when available.
+    expr_cfg = cfg.get("expression", {})
+    dab_od_threshold = float(expr_cfg.get("od_threshold", 0.15))
+    dab_dilate_radius = int(expr_cfg.get("dilate_radius", 2))
+    dab_nonnegative = str(expr_cfg.get("dab_nonnegative", "softplus"))
+    dab_softplus_beta = float(expr_cfg.get("softplus_beta", 10.0))
+    dab_stain_reference_mode = str(expr_cfg.get("stain_reference_mode", "batch_avg"))
+    dab_stain_ref_blend = float(expr_cfg.get("stain_ref_blend", 0.0))
+    dab_stain_min_ref_images = int(expr_cfg.get("stain_min_ref_images", 6))
+
     # Inference and metrics
     print(f"Running inference on {eval_split} set...")
     all_rows = []
@@ -139,20 +187,50 @@ def evaluate(cfg, checkpoint_path):
             y = batch["ihc"].to(device)
             fnames = batch["filename"]
 
+            # Forward pass: generate IHC from H&E
             y_hat = G(x)
 
-            # 9.1 Image similarity
+            # 9.1 Image similarity (pixel-level quality)
             psnr_vals = compute_psnr(y, y_hat)
             ssim_vals = compute_ssim(y, y_hat)
             lpips_vals = compute_lpips(y, y_hat, lpips_model)
 
-            # 9.2 DAB expression
-            dab_metrics = compute_dab_metrics(y, y_hat)
+            # 9.2 DAB expression (HER2 protein quantification)
+            dab_metrics = compute_dab_metrics(
+                y,
+                y_hat,
+                od_threshold=dab_od_threshold,
+                dilate_radius=dab_dilate_radius,
+                dab_nonnegative=dab_nonnegative,
+                softplus_beta=dab_softplus_beta,
+                stain_reference_mode=dab_stain_reference_mode,
+                stain_ref_blend=dab_stain_ref_blend,
+                stain_min_ref_images=dab_stain_min_ref_images,
+            )
 
-            # 9.3 Structure
-            nuclei_errs = compute_nuclei_density_error(y, y_hat)
-            membrane_errs = compute_membrane_intensity_error(y, y_hat)
+            # 9.3 Cell/membrane structure (nuclei density and membrane edge energy)
+            nuclei_errs = compute_nuclei_density_error(
+                y,
+                y_hat,
+                od_threshold=dab_od_threshold,
+                dilate_radius=dab_dilate_radius,
+                stain_reference_mode=dab_stain_reference_mode,
+                stain_ref_blend=dab_stain_ref_blend,
+                stain_min_ref_images=dab_stain_min_ref_images,
+            )
+            membrane_errs = compute_membrane_intensity_error(
+                y,
+                y_hat,
+                od_threshold=dab_od_threshold,
+                dilate_radius=dab_dilate_radius,
+                dab_nonnegative=dab_nonnegative,
+                softplus_beta=dab_softplus_beta,
+                stain_reference_mode=dab_stain_reference_mode,
+                stain_ref_blend=dab_stain_ref_blend,
+                stain_min_ref_images=dab_stain_min_ref_images,
+            )
 
+            # Merge all per-image metrics into one row per sample
             for i in range(len(fnames)):
                 row = {
                     "filename": fnames[i],
@@ -165,6 +243,7 @@ def evaluate(cfg, checkpoint_path):
                 }
                 all_rows.append(row)
 
+            # Save visual triplets (H&E | real IHC | generated IHC) for the first 10 batches
             if batch_idx < 10:
                 for i, fname in enumerate(fnames):
                     stem = Path(fname).stem
@@ -190,7 +269,6 @@ def evaluate(cfg, checkpoint_path):
         "psnr",
         "ssim",
         "lpips",
-        "dab_pearson_r",
         "iod_rel_err",
         "miod_rel_err",
         "nuclei_density_error",

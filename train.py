@@ -8,6 +8,7 @@ Usage:
 import argparse
 import math
 import os
+import statistics
 
 import torch
 import torch.nn as nn
@@ -32,28 +33,13 @@ from src.metrics.metrics import (
     load_lpips_model,
 )
 
-import cv2
 
-def debug_pairs(dataset, k=4, out="pair_debug.png"):
-    fig, axes = plt.subplots(k, 2, figsize=(6, 3*k))
-    for i in range(k):
-        fname = dataset.filenames[i]
-        he_path = dataset.he_dir / fname
-        ihc_path = dataset.ihc_dir / fname
 
-        he = cv2.cvtColor(cv2.imread(str(he_path)), cv2.COLOR_BGR2RGB)
-        ihc = cv2.cvtColor(cv2.imread(str(ihc_path)), cv2.COLOR_BGR2RGB)
 
-        axes[i,0].imshow(he); axes[i,0].set_title(f"HE {fname}"); axes[i,0].axis("off")
-        axes[i,1].imshow(ihc); axes[i,1].set_title(f"IHC {fname}"); axes[i,1].axis("off")
-
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print("saved", out)
 
 
 def load_config(path):
+    """Load a YAML config file and return it as a dict."""
     with open(path) as f:
         return yaml.safe_load(f)
 
@@ -92,16 +78,17 @@ def _to_finite_float(value):
 
 def _is_better(metric_name, current, best):
     """Compare metric values with metric-specific direction."""
-    if metric_name in {"psnr", "ssim", "dab_pearson_r", "expr"}:
+    if metric_name in {"psnr", "ssim", "expr"}:
         return current > best
     if metric_name in {"lpips", "iod_rel_err", "miod_rel_err", "pyr_loss"}:
         return current < best
     raise ValueError(f"Unsupported metric for best-checkpoint selection: {metric_name}")
 
 
-def _compute_expr_score(dab_r, miod_rel_err, eps=1e-8):
-    """Higher is better: favors high DAB correlation and low mIOD relative error."""
-    return float(dab_r) / max(float(miod_rel_err), eps)
+def _compute_expr_score(iod_rel_err, miod_rel_err, eps=1e-8):
+    """Higher is better: favors low IOD/mIOD relative errors."""
+    expr_err = 0.5 * (float(iod_rel_err) + float(miod_rel_err))
+    return 1.0 / max(expr_err, eps)
 
 
 def _tile_batch_2x2(x, y, tile_size):
@@ -145,6 +132,7 @@ def train(cfg):
     train_crops_per_image = int(data_cfg.get("train_crops_per_image", 1))
     train_crop_mode = str(data_cfg.get("train_crop_mode", "random")).lower()
     val_full_resolution = bool(data_cfg.get("val_full_resolution", False))
+    val_image_size = int(data_cfg.get("val_image_size", data_cfg["image_size"]))
     val_tiling_mode = str(cfg["training"].get("val_tiling_mode", "none")).lower()
     val_tile_size = int(cfg["training"].get("val_tile_size", 512))
     val_sample_n = int(cfg["training"].get("val_sample_n", 4))
@@ -154,6 +142,8 @@ def train(cfg):
         raise ValueError("training.val_batch_size must be >= 1")
     if val_tiling_mode not in {"none", "2x2"}:
         raise ValueError("training.val_tiling_mode must be one of {'none', '2x2'}.")
+    if val_image_size < 1:
+        raise ValueError("data.val_image_size must be >= 1")
     if val_tile_size < 1:
         raise ValueError("training.val_tile_size must be >= 1")
     if val_sample_n < 1:
@@ -175,7 +165,7 @@ def train(cfg):
     val_ds = BCIDataset(
         data_cfg["root_dir"],
         split="val",
-        image_size=data_cfg["image_size"],
+        image_size=val_image_size,
         use_full_resolution=val_full_resolution,
     )
     # debug_pairs(train_ds, k=8)
@@ -187,11 +177,14 @@ def train(cfg):
     )
     print(f"Train crop mode: {train_crop_mode}")
     if val_full_resolution:
-        print(f"Validation transform: full resolution (batch_size={val_batch_size})")
+        print(
+            "Validation transform: full resolution "
+            f"(batch_size={val_batch_size}, val_image_size ignored)"
+        )
     else:
         print(
             "Validation transform: center crop "
-            f"{data_cfg['image_size']}x{data_cfg['image_size']} "
+            f"{val_image_size}x{val_image_size} "
             f"(batch_size={val_batch_size})"
         )
     if val_tiling_mode == "2x2":
@@ -218,16 +211,25 @@ def train(cfg):
     )
 
     # ── Models ──
-    model_norm = cfg["model"].get("norm", "instance")
+    model_cfg = cfg["model"]
+    model_norm_default = model_cfg.get("norm", "instance")
+    model_norm_g = model_cfg.get("norm_G", model_norm_default)
+    model_norm_d = model_cfg.get("norm_D", model_norm_default)
+    model_spectral_norm_d = bool(model_cfg.get("spectral_norm_D", False))
+    print(
+        "Model normalization: "
+        f"G={model_norm_g}, D={model_norm_d}, D_spectral_norm={model_spectral_norm_d}"
+    )
     G = Generator(
-        in_channels=cfg["model"]["in_channels"],
-        out_channels=cfg["model"]["out_channels"],
-        num_res_blocks=cfg["model"]["num_res_blocks"],
-        norm_type=model_norm,
+        in_channels=model_cfg["in_channels"],
+        out_channels=model_cfg["out_channels"],
+        num_res_blocks=model_cfg["num_res_blocks"],
+        norm_type=model_norm_g,
     ).to(device)
     D = PatchDiscriminator(
-        in_channels=cfg["model"]["in_channels"] + cfg["model"]["out_channels"],
-        norm_type=model_norm,
+        in_channels=model_cfg["in_channels"] + model_cfg["out_channels"],
+        norm_type=model_norm_d,
+        use_spectral_norm=model_spectral_norm_d,
     ).to(device)
 
     # ── Losses ──
@@ -246,6 +248,12 @@ def train(cfg):
             stain_reference_mode=cfg["expression"].get("stain_reference_mode", "none"),
             stain_ref_blend=float(cfg["expression"].get("stain_ref_blend", 0.0)),
             stain_min_ref_images=int(cfg["expression"].get("stain_min_ref_images", 4)),
+            spatial_weight=float(cfg["expression"].get("spatial_weight", 0.5)),
+            spatial_grid_size=int(cfg["expression"].get("spatial_grid_size", 16)),
+            spatial_min_tissue_frac=float(
+                cfg["expression"].get("spatial_min_tissue_frac", 0.10)
+            ),
+            spatial_min_signal=float(cfg["expression"].get("spatial_min_signal", 0.0)),
         ).to(device)
     lpips_model = load_lpips_model(device)
     if lpips_model is None:
@@ -307,32 +315,16 @@ def train(cfg):
     val_schedule = str(cfg["training"].get("val_schedule", "fixed")).lower()
     val_start_epoch = int(cfg["training"].get("val_start_epoch", 1))
     val_every = int(cfg["training"].get("val_every", 5))
-    val_cooldown_epochs = int(cfg["training"].get("val_cooldown_epochs", val_every))
-    val_loss_min_delta = float(cfg["training"].get("val_loss_min_delta", 0.0))
-    val_reset_global_best_after_epochs = int(
-        cfg["training"].get("val_reset_global_best_after_epochs", 15)
-    )
-    if val_schedule not in {"fixed", "on_train_loss"}:
-        raise ValueError(
-            "training.val_schedule must be one of {'fixed', 'on_train_loss'}."
-        )
+    if val_schedule != "fixed":
+        raise ValueError("training.val_schedule must be 'fixed'.")
     if val_start_epoch < 1:
         raise ValueError("training.val_start_epoch must be >= 1")
     if val_every < 1:
         raise ValueError("training.val_every must be >= 1")
-    if val_cooldown_epochs < 1:
-        raise ValueError("training.val_cooldown_epochs must be >= 1")
-    if val_loss_min_delta < 0:
-        raise ValueError("training.val_loss_min_delta must be >= 0")
-    if val_reset_global_best_after_epochs < 1:
-        raise ValueError(
-            "training.val_reset_global_best_after_epochs must be >= 1"
-        )
     valid_best_metrics = {
         "psnr",
         "ssim",
         "lpips",
-        "dab_pearson_r",
         "iod_rel_err",
         "miod_rel_err",
         "pyr_loss",
@@ -346,13 +338,11 @@ def train(cfg):
         )
     save_extra_best = bool(cfg["training"].get("save_extra_best_checkpoints", True))
 
-    if best_metric in {"psnr", "ssim", "dab_pearson_r", "expr"}:
+    if best_metric in {"psnr", "ssim", "expr"}:
         best_primary_value = -float("inf")
     else:
         best_primary_value = float("inf")
     best_primary_epoch = 0
-    last_val_epoch = 0
-    best_train_loss_seen = float("inf")
     best_extra_values = {
         "psnr": -float("inf"),
         "lpips": float("inf"),
@@ -362,48 +352,58 @@ def train(cfg):
 
     log_file = open(os.path.join(run_dir, "train_log.csv"), "w")
     log_file.write(
-        "epoch,loss_D,loss_adv,loss_pyr,loss_expr,loss_G,"
-        "val_psnr,val_ssim,val_lpips,val_dab_pearson_r,val_iod_rel_err,val_miod_rel_err,val_pyr_loss,"
+        "epoch,loss_D,loss_adv,loss_pyr,loss_expr,loss_G,expr_active_frac,"
+        "val_psnr,val_ssim,val_lpips,val_iod_rel_err,val_iod_rel_err_median,"
+        "val_miod_rel_err,val_miod_rel_err_median,val_pyr_loss,"
         "iod_real,iod_gen,miod_real,miod_gen\n"
     )
 
-    if val_schedule == "on_train_loss":
-        print(
-            "Validation schedule: on_train_loss "
-            f"(start_epoch={val_start_epoch}, cooldown={val_cooldown_epochs}, "
-            f"min_delta={val_loss_min_delta}, "
-            f"reset_after={val_reset_global_best_after_epochs})"
-        )
-    else:
-        print(
-            "Validation schedule: fixed "
-            f"(start_epoch={val_start_epoch}, every={val_every})"
-        )
+    print(
+        "Validation schedule: fixed "
+        f"(start_epoch={val_start_epoch}, every={val_every})"
+    )
+    
+    # DAB metric settings for validation; keep aligned with eval.py for consistency.
+    expr_cfg = cfg.get("expression", {})
+    dab_od_threshold = float(expr_cfg.get("od_threshold", 0.15))
+    dab_dilate_radius = int(expr_cfg.get("dilate_radius", 2))
+    dab_nonnegative = str(expr_cfg.get("dab_nonnegative", "softplus"))
+    dab_softplus_beta = float(expr_cfg.get("softplus_beta", 10.0))
+    dab_stain_reference_mode = str(expr_cfg.get("stain_reference_mode", "batch_avg"))
+    dab_stain_ref_blend = float(expr_cfg.get("stain_ref_blend", 0.0))
+    dab_stain_min_ref_images = int(expr_cfg.get("stain_min_ref_images", 6))
 
     for epoch in range(start_epoch, epochs):
         G.train()
         D.train()
 
+        # Running totals accumulated over batches; divided by n_batches at epoch end
         epoch_stats = {
             "loss_D": 0, "loss_adv": 0, "loss_pyr": 0,
             "loss_expr": 0, "loss_G": 0, "n_batches": 0, "n_d_steps": 0,
             "iod_real": 0, "iod_gen": 0, "miod_real": 0, "miod_gen": 0,
+            "expr_active_frac": 0,
         }
 
+        # Expression loss is enabled only after epoch_add_expr (curriculum schedule)
         use_expr = expr_enabled and epoch >= epoch_add_expr
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         last_loss_d = 0.0
-       
+
         for step, batch in enumerate(pbar):
-            x = batch["he"].to(device)
-            y = batch["ihc"].to(device)
-            y_hat = G(x) 
+            x = batch["he"].to(device)    # H&E input
+            y = batch["ihc"].to(device)   # real IHC target
+            y_hat = G(x)                  # generated IHC
+
+            # ── Discriminator update (every d_update_every steps) ──
+            # y_hat is detached so G gradients are NOT computed here.
             if step % d_update_every == 0:
                 for p in D.parameters():
                     p.requires_grad_(True)
                 real_pred = D(x, y)
-                fake_pred = D(x, y_hat.detach())            
+                fake_pred = D(x, y_hat.detach())
+                # LSGAN: real targets = 1, fake targets = 0
                 loss_D_real = criterion_GAN(real_pred, torch.full_like(real_pred, real_label))
                 loss_D_fake = criterion_GAN(fake_pred, torch.full_like(fake_pred, fake_label))
                 loss_D = (loss_D_real + loss_D_fake) * 0.5
@@ -416,28 +416,35 @@ def train(cfg):
                 epoch_stats["loss_D"] += last_loss_d
                 epoch_stats["n_d_steps"] += 1
 
-
+            # ── Generator update ──
+            # Freeze D gradients to avoid unnecessary computation during G backward
             for p in D.parameters():
                 p.requires_grad_(False)
-            
+
+            # G wants D to output 1 ("real") for its generated images
             fake_pred_G = D(x, y_hat)
-
             loss_adv = criterion_GAN(fake_pred_G, torch.full_like(fake_pred_G, gen_label))
-            
-            loss_pyr = criterion_pyr(y, y_hat)
-            
-            loss_G = lambda_adv * loss_adv + lambda_pyr * loss_pyr
-            
 
+            # Multi-scale Gaussian pyramid L1 for misalignment-tolerant reconstruction
+            loss_pyr = criterion_pyr(y, y_hat)
+
+            loss_G = lambda_adv * loss_adv + lambda_pyr * loss_pyr
+
+            # Default zero expression loss; overwritten below if active
             loss_expr_val = torch.tensor(0.0, device=device)
             expr_weight = 0.0
-            expr_info = {"iod_real": 0, "iod_gen": 0, "miod_real": 0, "miod_gen": 0}
-            # print("test y:")
-            # print(y)
-            # print("test y^")
-            # print(y_hat)
+            expr_info = {
+                "iod_real": 0,
+                "iod_gen": 0,
+                "miod_real": 0,
+                "miod_gen": 0,
+                "expr_active_frac": 0,
+            }
+
             if use_expr:
                 loss_expr_val, expr_info = criterion_expr(y, y_hat)
+                # Optional linear warm-up: ramp lambda_expr from 0 -> lambda_expr
+                # over warmup_epochs after expression loss is switched on
                 if expr_warmup_epochs > 0:
                     warmup_progress = min(
                         1.0, (epoch - epoch_add_expr + 1) / expr_warmup_epochs
@@ -445,14 +452,14 @@ def train(cfg):
                     expr_weight = lambda_expr * warmup_progress
                 else:
                     expr_weight = lambda_expr
-                #total_loss with expression
+                # Add expression term to the total generator loss
                 loss_G = loss_G + expr_weight * loss_expr_val
-            
+
             opt_G.zero_grad(set_to_none=True)
             loss_G.backward()
             opt_G.step()
 
-            # Accumulate
+            # Accumulate batch stats for epoch-level averages
             epoch_stats["loss_adv"] += loss_adv.item()
             epoch_stats["loss_pyr"] += loss_pyr.item()
             epoch_stats["loss_expr"] += loss_expr_val.item()
@@ -461,6 +468,7 @@ def train(cfg):
             epoch_stats["iod_gen"] += expr_info["iod_gen"]
             epoch_stats["miod_real"] += expr_info["miod_real"]
             epoch_stats["miod_gen"] += expr_info["miod_gen"]
+            epoch_stats["expr_active_frac"] += expr_info["expr_active_frac"]
             epoch_stats["n_batches"] += 1
 
             pbar.set_postfix({
@@ -473,6 +481,7 @@ def train(cfg):
         sched_G.step()
         sched_D.step()
 
+        # Compute per-epoch averages (D loss divided by D steps, all others by batch count)
         nb = max(epoch_stats["n_batches"], 1)
         nd = max(epoch_stats["n_d_steps"], 1)
         avg = {}
@@ -482,46 +491,26 @@ def train(cfg):
             avg[k] = v / (nd if k == "loss_D" else nb)
 
         epoch_num = epoch + 1
-        if val_schedule == "on_train_loss":
-            if last_val_epoch > 0:
-                epochs_since_last_val = epoch_num - last_val_epoch
-                if epochs_since_last_val > val_reset_global_best_after_epochs:
-                    print(
-                        "  Resetting train-loss global_best "
-                        f"(no validation for {epochs_since_last_val} epochs)."
-                    )
-                    best_train_loss_seen = float("inf")
-            train_loss_epoch = float(avg["loss_G"])
-            loss_improved = train_loss_epoch + val_loss_min_delta < best_train_loss_seen
-            if loss_improved:
-                best_train_loss_seen = train_loss_epoch
-            cooldown_ready = (
-                last_val_epoch == 0
-                or (epoch_num - last_val_epoch) >= val_cooldown_epochs
-            )
-            should_validate = (
-                epoch_num >= val_start_epoch
-                and loss_improved
-                and cooldown_ready
-            )
-        else:
-            should_validate = (
-                epoch_num >= val_start_epoch
-                and ((epoch_num - val_start_epoch) % val_every == 0)
-            )
+        should_validate = (
+            epoch_num >= val_start_epoch
+            and ((epoch_num - val_start_epoch) % val_every == 0)
+        )
 
         # ── Validation ──
+        # Initialise to neutral values; only overwritten when should_validate is True
         val_psnr, val_ssim = 0.0, 0.0
         val_lpips = float("nan")
-        val_dab_pearson_r = 0.0
         val_iod_rel_err = 0.0
+        val_iod_rel_err_median = 0.0
         val_miod_rel_err = 0.0
+        val_miod_rel_err_median = 0.0
         val_pyr_loss = 0.0
         if should_validate:
             G.eval()
             psnr_vals, ssim_vals, lpips_vals = [], [], []
-            dab_pearson_vals, iod_rel_vals, miod_rel_vals = [], [], []
+            iod_rel_vals, miod_rel_vals = [], []
             pyr_vals = []
+            # Track sample images to save a visual grid (up to val_sample_n rows)
             sample_saved = False
             sample_count = 0
             sample_x_parts, sample_y_parts, sample_yhat_parts = [], [], []
@@ -529,6 +518,8 @@ def train(cfg):
                 for batch in val_loader:
                     x = batch["he"].to(device)
                     y = batch["ihc"].to(device)
+                    # Optional 2x2 corner tiling: each full-res image becomes 4 tiles,
+                    # expanding the effective batch size 4x for metric computation
                     if val_tiling_mode == "2x2":
                         x_val, y_val = _tile_batch_2x2(x, y, val_tile_size)
                     else:
@@ -538,9 +529,18 @@ def train(cfg):
                     ssim_vals.extend(compute_ssim(y_val, y_hat))
                     lpips_vals.extend(compute_lpips(y_val, y_hat, lpips_model))
                     pyr_vals.append(criterion_pyr(y_val, y_hat).item())
-                    dab_batch = compute_dab_metrics(y_val, y_hat)
+                    dab_batch = compute_dab_metrics(
+                        y_val,
+                        y_hat,
+                        od_threshold=dab_od_threshold,
+                        dilate_radius=dab_dilate_radius,
+                        dab_nonnegative=dab_nonnegative,
+                        softplus_beta=dab_softplus_beta,
+                        stain_reference_mode=dab_stain_reference_mode,
+                        stain_ref_blend=dab_stain_ref_blend,
+                        stain_min_ref_images=dab_stain_min_ref_images,
+                    )
                     for m in dab_batch:
-                        dab_pearson_vals.append(m["dab_pearson_r"])
                         iod_rel_vals.append(m["iod_rel_err"])
                         miod_rel_vals.append(m["miod_rel_err"])
                     if not sample_saved:
@@ -573,28 +573,31 @@ def train(cfg):
             val_psnr = sum(psnr_vals) / len(psnr_vals)
             val_ssim = sum(ssim_vals) / len(ssim_vals)
             val_lpips = sum(lpips_vals) / len(lpips_vals) if lpips_vals else float("nan")
-            val_dab_pearson_r = (
-                sum(dab_pearson_vals) / len(dab_pearson_vals) if dab_pearson_vals else 0.0
-            )
             val_iod_rel_err = sum(iod_rel_vals) / len(iod_rel_vals) if iod_rel_vals else 0.0
+            val_iod_rel_err_median = (
+                statistics.median(iod_rel_vals) if iod_rel_vals else 0.0
+            )
             val_miod_rel_err = (
                 sum(miod_rel_vals) / len(miod_rel_vals) if miod_rel_vals else 0.0
+            )
+            val_miod_rel_err_median = (
+                statistics.median(miod_rel_vals) if miod_rel_vals else 0.0
             )
             val_pyr_loss = sum(pyr_vals) / len(pyr_vals) if pyr_vals else 0.0
             print(
                 f"  Val PSNR: {val_psnr:.2f}  SSIM: {val_ssim:.4f}  LPIPS: {val_lpips:.4f}"
             )
             print(
-                f"  Val DAB-r: {val_dab_pearson_r:.4f}  IOD-rel: {val_iod_rel_err:.4f}"
-                f"  mIOD-rel: {val_miod_rel_err:.4f}  Pyr: {val_pyr_loss:.4f}"
+                f"  Val IOD-rel mean/med: {val_iod_rel_err:.4f}/{val_iod_rel_err_median:.4f}  "
+                f"mIOD-rel mean/med: {val_miod_rel_err:.4f}/{val_miod_rel_err_median:.4f}  "
+                f"Pyr: {val_pyr_loss:.4f}"
             )
 
-            expr_score = _compute_expr_score(val_dab_pearson_r, val_miod_rel_err)
+            expr_score = _compute_expr_score(val_iod_rel_err, val_miod_rel_err)
             metric_values = {
                 "psnr": val_psnr,
                 "ssim": val_ssim,
                 "lpips": val_lpips,
-                "dab_pearson_r": val_dab_pearson_r,
                 "iod_rel_err": val_iod_rel_err,
                 "miod_rel_err": val_miod_rel_err,
                 "pyr_loss": val_pyr_loss,
@@ -630,19 +633,22 @@ def train(cfg):
                         best_extra_epochs[metric_name] = epoch + 1
                         torch.save(G.state_dict(), os.path.join(run_dir, filename))
 
-            last_val_epoch = epoch_num
         # Log
         log_file.write(
             f"{epoch+1},{avg['loss_D']:.6f},{avg['loss_adv']:.6f},"
             f"{avg['loss_pyr']:.6f},{avg['loss_expr']:.6f},{avg['loss_G']:.6f},"
-            f"{val_psnr:.4f},{val_ssim:.6f},{val_lpips:.6f},{val_dab_pearson_r:.6f},"
-            f"{val_iod_rel_err:.6f},{val_miod_rel_err:.6f},{val_pyr_loss:.6f},"
+            f"{avg['expr_active_frac']:.6f},"
+            f"{val_psnr:.4f},{val_ssim:.6f},{val_lpips:.6f},"
+            f"{val_iod_rel_err:.6f},{val_iod_rel_err_median:.6f},"
+            f"{val_miod_rel_err:.6f},{val_miod_rel_err_median:.6f},{val_pyr_loss:.6f},"
             f"{avg['iod_real']:.4f},{avg['iod_gen']:.4f},"
             f"{avg['miod_real']:.6f},{avg['miod_gen']:.6f}\n"
         )
         log_file.flush()
 
-        # ── Checkpoints ──
+        # ── Periodic checkpoints ──
+        # Full training state (G, D, optimizers, schedulers) saved every save_every epochs.
+        # These allow resuming training mid-run; generator_best.pth saves only G weights.
         if (epoch + 1) % cfg["training"]["save_every"] == 0:
             torch.save(
                 {

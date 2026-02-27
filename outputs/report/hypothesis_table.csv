@@ -1,0 +1,4 @@
+Hypothesis,Expected,Observed,Status
+M_expr improves DAB expression agreement (lower mIOD relative error),up,"up (improved) (base=0.5484, expr=0.5144)",Supported
+Membrane structure metrics improve without explicit membrane loss,neutral,"up (improved) (base=0.9190, expr=0.8398)",Contradicted
+PSNR may not improve (possible trade-off),neutral/down,"down (degraded) (base=20.7679, expr=20.3819)",Supported

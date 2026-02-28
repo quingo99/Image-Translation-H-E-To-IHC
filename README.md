@@ -100,15 +100,6 @@ python eval.py --config configs/expr.yaml --checkpoint outputs/expr/run_001/gene
 python report.py \
   --base outputs/base/run_001/metrics_val.csv \
   --expr outputs/expr/run_001/metrics_val.csv
-```
-
-### Colab
-
-Open `colab_run.ipynb` in Google Colab. It expects a zip of this project
-(with data inside) uploaded to Google Drive, then runs training + evaluation
-automatically.
-
----
 
 ## Checkpoints
 

@@ -138,7 +138,7 @@ outputs/<model>/run_NNN/
 Metrics columns in the CSV:
 
 | Column | Description |
-|---|---|
+|--------|-------------|
 | `psnr` | Peak signal-to-noise ratio (dB, higher is better) |
 | `ssim` | Structural similarity (higher is better) |
 | `lpips` | Perceptual distance via AlexNet (lower is better) |

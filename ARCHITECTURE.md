@@ -19,9 +19,9 @@ H&E patch (256×256)
   └──────────┘             │                              │
        ▲                   │              ┌───────────────▼──────────────┐
        │              ┌────▼─────┐        │       Expression Loss        │
-  real H&E             │Real IHC  │        │  Macenko stain separation    │
-                       └────┬─────┘        │  IOD/mIOD relative error     │
-                            │              └──────────────────────────────┘
+  real H&E            │Real IHC  │        │  Macenko stain separation    │
+                      └────┬─────┘        │  IOD/mIOD relative error     │
+                            │             └──────────────────────────────┘
                    ┌────────▼────────┐
                    │  Discriminator  │
                    │  (PatchGAN)     │

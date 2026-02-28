@@ -97,9 +97,7 @@ python eval.py --config configs/base.yaml --checkpoint outputs/base/run_001/gene
 python eval.py --config configs/expr.yaml --checkpoint outputs/expr/run_001/generator_best.pth
 
 # Generate comparison report
-python report.py \
-  --base outputs/base/run_001/metrics_val.csv \
-  --expr outputs/expr/run_001/metrics_val.csv
+python report.py --base outputs/base/run_001/metrics_test.csv --expr outputs/expr/run_001/metrics_test.csv
 ```
 
 ### Colab

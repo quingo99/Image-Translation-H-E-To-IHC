@@ -48,8 +48,8 @@ training:
 expression:
   enabled: true
   lambda_expr: 2.2
-  epoch_add_expr: 20
-  warmup_epochs: 0
+  epoch_add_expr: 40
+  warmup_epochs: 10
   od_threshold: 0.15
   dilate_radius: 2
   min_iod_signal: 200

@@ -1,8 +1,8 @@
 """Inspect IOD/mIOD signal on IHC images and save debug visualizations.
 
 Examples:
-    python scripts/inspect_expression_signal.py --input data/raw/train/IHC --recursive
-    python scripts/inspect_expression_signal.py --input data/raw/train/IHC/00001.png --show
+    python scripts/inspect_expression_signal.py --input data/BCI/train/IHC --recursive
+    python scripts/inspect_expression_signal.py --input data/BCI/train/IHC/00001.png --show
 """
 
 import argparse
@@ -37,7 +37,7 @@ def parse_args():
         "--input",
         type=str,
         required=True,
-        help="Image file, directory, or glob pattern (e.g., data/raw/train/IHC/*.png).",
+        help="Image file, directory, or glob pattern (e.g., data/BCI/train/IHC/*.png).",
     )
     parser.add_argument(
         "--recursive",

@@ -1,5 +1,5 @@
 data:
-  root_dir: "data/raw"
+  root_dir: "data/BCI"
   image_size: 256
   val_image_size: 512
   train_crops_per_image: 1

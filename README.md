@@ -52,7 +52,7 @@ outputs/
 
 **Data** (gitignored):
 ```
-data/raw/
+data/BCI/
 ├── train/HE/  + IHC/        # 3396 paired training images
 ├── val/HE/    + IHC/        # 500 paired validation images
 ├── test/HE/                 # 977 test images (no paired IHC)
@@ -73,7 +73,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Place data under `data/raw/` with matching filenames across HE and IHC directories.
+Place data under `data/BCI/` with matching filenames across HE and IHC directories.
 
 ---
 
@@ -83,6 +83,7 @@ Place data under `data/raw/` with matching filenames across HE and IHC directori
 
 ```bash
 python run.py all
+python run.py all --dataset her2match   # use a different dataset
 ```
 
 ### Individual steps
@@ -91,22 +92,40 @@ python run.py all
 # Train
 python train.py --config configs/base.yaml
 python train.py --config configs/expr.yaml
+python train.py --config configs/base.yaml --dataset her2match   # override dataset
 
 # Evaluate (auto-selects test split; falls back to val if no paired IHC)
-python eval.py --config configs/base.yaml --checkpoint outputs/base/run_001/generator_best.pth
-python eval.py --config configs/expr.yaml --checkpoint outputs/expr/run_001/generator_best.pth
+
+python eval.py --config outputs/base/run_00X/config.yaml --checkpoint outputs/base/run_00X/generator_best.pth
+python eval.py --config outputs/expr/run_00X/config.yaml --checkpoint outputs/expr/run_00X/generator_best.pth 
 
 # Generate comparison report
 python report.py --base outputs/base/run_001/metrics_test.csv --expr outputs/expr/run_001/metrics_test.csv
 ```
 
-### Colab
+### `--dataset` option
 
-Open `colab_run.ipynb` in Google Colab. It expects a zip of this project
-(with data inside) uploaded to Google Drive, then runs training + evaluation
-automatically.
+All train/eval commands accept `--dataset <name>` to switch datasets without editing any config file.
+The name maps directly to a folder under `data/`:
 
----
+| Command | Example |
+|---|---|
+| `train.py` | `python train.py --config configs/base.yaml --dataset her2match` |
+| `eval.py` | `python eval.py --config configs/base.yaml --checkpoint <ckpt> --dataset her2match` |
+| `run.py train` | `python run.py train --config configs/base.yaml --dataset her2match` |
+| `run.py eval` | `python run.py eval --config configs/base.yaml --checkpoint <ckpt> --dataset her2match` |
+| `run.py all` | `python run.py all --dataset her2match` |
+
+`--dataset` overrides `data.root_dir` in the config. Omit it to use the value from the YAML (default: `data/BCI`).
+
+The dataset folder must follow the same layout:
+```
+data/<name>/
+├── train/HE/  + IHC/
+├── val/HE/    + IHC/
+└── test/HE/              # IHC optional (used for eval if present)
+```
+
 
 ## Checkpoints
 
@@ -164,7 +183,7 @@ All parameters shared between `base.yaml` and `expr.yaml` unless noted.
 
 | Key | Default | Description |
 |---|---|---|
-| `root_dir` | `"data/raw"` | Root directory containing `train/`, `val/`, `test/` splits |
+| `root_dir` | `"data/BCI"` | Root directory containing `train/`, `val/`, `test/` splits (overridable with `--dataset`) |
 | `image_size` | `256` | Spatial size for training crops and val center crop |
 | `val_image_size` | `512` | Override crop size for validation (defaults to `image_size`) |
 | `train_crops_per_image` | `1` | Random crops drawn per training image per epoch |
@@ -240,13 +259,86 @@ All parameters shared between `base.yaml` and `expr.yaml` unless noted.
 
 ---
 
+## Stain Separation Validation
+
+Validate the Macenko H/DAB stain separation by reconstructing IHC images from their
+deconvolved channels and measuring PSNR/MSE/MAE vs the original.
+
+```bash
+# none mode only (per-image Macenko, no batch reference)
+venv/Scripts/python validate_stain_separation.py --split val
+
+# both modes: none + config (batch_median with training params)
+venv/Scripts/python validate_stain_separation.py --split val \
+    --config outputs/expr/run_001/config.yaml
+
+# train split, custom thresholds
+venv/Scripts/python validate_stain_separation.py --split train \
+    --config outputs/expr/run_001/config.yaml \
+    --fail_psnr 35 --top_k 20
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--split` | `val` | Dataset split to process (`val` or `train`) |
+| `--config` | *(none)* | Path to training YAML; when provided also runs the config stain mode and produces a comparison |
+| `--fail_psnr` | `35` | PSNR (dB) below which a reconstruction is flagged as failed |
+| `--top_k` | `16` | Always save the K worst images regardless of threshold |
+| `--output_dir` | `outputs/stain_validation` | Root output directory |
+| `--n_workers` | `1` | Parallel workers for none mode |
+
+**Outputs** under `outputs/stain_validation/<split>/`:
+
+```
+none/
+  metrics.csv              # per-image PSNR / MSE / MAE
+  error_distribution.png   # PSNR histogram + CDF, MSE / MAE histograms
+  worst_grid.png           # grid of worst-K images (original / reconstructed)
+  failed/<stem>_fail.png   # 7-panel figure per failing image
+batch_median/              # only when --config is provided (named after reference_mode)
+  metrics.csv / error_distribution.png / worst_grid.png / failed/
+comparison.csv             # both modes side by side + delta + winner column
+mode_comparison.png        # overlaid distributions, CDFs, per-image scatter, Δ histogram
+side_by_side/              # top-K images where the two modes differ most
+```
+
+---
+
+## H-channel Visualisation
+
+Compare the Hematoxylin (H) channel between paired H&E and IHC images using
+per-image Macenko stain separation.
+
+```bash
+venv/Scripts/python visualize_h_channel.py --n_samples 8 \
+    --output_dir outputs/h_channel_viz
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--n_samples` | `6` | Number of random paired samples to visualise |
+| `--output_dir` | `outputs/h_channel_viz` | Output directory |
+| `--seed` | `42` | Random seed for sample selection |
+
+Produces five figures:
+
+| File | Description |
+|---|---|
+| `h_channel_comparison.png` | H&E RGB · H-amount · IHC RGB · H-amount · H diff |
+| `h_rendered_comparison.png` | Same but H rendered back to RGB via stain vector |
+| `h_channel_distribution.png` | Overlaid histogram + boxplot of H-amounts |
+| `stain_vectors.png` | Estimated H and DAB OD unit vectors per sample |
+| `h_scatter.png` | Per-pixel H-amount scatter (H&E vs IHC) with Pearson r |
+
+---
+
 ## DAB Signal Diagnostics
 
 Before training, inspect DAB signal quality across the dataset:
 
 ```bash
 python scripts/inspect_expression_signal.py \
-  --input data/raw/train/IHC \
+  --input data/BCI/train/IHC \
   --output-dir outputs/signal_debug \
   --max-figures 20
 ```

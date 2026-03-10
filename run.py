@@ -54,11 +54,13 @@ def main():
     # train
     p_train = sub.add_parser("train", help="Train a model")
     p_train.add_argument("--config", type=str, required=True)
+    p_train.add_argument("--dataset", type=str, default=None, help="Dataset name under data/ (e.g. BCI, her2match). Overrides config root_dir.")
 
     # eval
     p_eval = sub.add_parser("eval", help="Evaluate a model")
     p_eval.add_argument("--config", type=str, required=True)
     p_eval.add_argument("--checkpoint", type=str, required=True)
+    p_eval.add_argument("--dataset", type=str, default=None, help="Dataset name under data/ (e.g. BCI, her2match). Overrides config root_dir.")
 
     # report
     p_report = sub.add_parser("report", help="Generate comparison report")
@@ -68,17 +70,22 @@ def main():
 
     # all
     p_all = sub.add_parser("all", help="Run full pipeline: train both, eval both, report")
+    p_all.add_argument("--dataset", type=str, default=None, help="Dataset name under data/ (e.g. BCI, her2match). Overrides config root_dir.")
 
     args = parser.parse_args()
 
     if args.command == "train":
         from train import train, load_config
         cfg = load_config(args.config)
+        if args.dataset:
+            cfg["data"]["root_dir"] = f"data/{args.dataset}"
         train(cfg)
 
     elif args.command == "eval":
         from eval import evaluate, load_config
         cfg = load_config(args.config)
+        if args.dataset:
+            cfg["data"]["root_dir"] = f"data/{args.dataset}"
         evaluate(cfg, args.checkpoint)
 
     elif args.command == "report":
@@ -95,6 +102,8 @@ def main():
         print("  STEP 1: Training M_base (Pyramid Pix2Pix)")
         print("=" * 60)
         cfg_base = load_train_config("configs/base.yaml")
+        if args.dataset:
+            cfg_base["data"]["root_dir"] = f"data/{args.dataset}"
         train(cfg_base)
 
         # Step 2: Train expr
@@ -102,6 +111,8 @@ def main():
         print("  STEP 2: Training M_expr (Pyramid Pix2Pix + L_expr)")
         print("=" * 60)
         cfg_expr = load_train_config("configs/expr.yaml")
+        if args.dataset:
+            cfg_expr["data"]["root_dir"] = f"data/{args.dataset}"
         train(cfg_expr)
 
         # Step 3: Evaluate baseline
@@ -112,6 +123,8 @@ def main():
         base_ckpt = find_best_checkpoint(base_run)
         if base_ckpt:
             cfg_base = load_eval_config("configs/base.yaml")
+            if args.dataset:
+                cfg_base["data"]["root_dir"] = f"data/{args.dataset}"
             evaluate(cfg_base, base_ckpt)
         else:
             print("ERROR: No checkpoint found for base model!")
@@ -124,6 +137,8 @@ def main():
         expr_ckpt = find_best_checkpoint(expr_run)
         if expr_ckpt:
             cfg_expr = load_eval_config("configs/expr.yaml")
+            if args.dataset:
+                cfg_expr["data"]["root_dir"] = f"data/{args.dataset}"
             evaluate(cfg_expr, expr_ckpt)
         else:
             print("ERROR: No checkpoint found for expr model!")

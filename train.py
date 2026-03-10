@@ -691,7 +691,10 @@ def train(cfg):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name under data/ (e.g. BCI, her2match). Overrides config root_dir.")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if args.dataset:
+        cfg["data"]["root_dir"] = f"data/{args.dataset}"
     train(cfg)
 

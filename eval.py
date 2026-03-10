@@ -5,7 +5,7 @@ Usage:
     python eval.py --config configs/expr.yaml --checkpoint outputs/expr/run_001/generator_best.pth
 
 Produces: outputs/<model>/run_NNN/metrics_<split>.csv
-Ground truth: test/IHC or data/raw/groundtruth/; falls back to val split.
+Ground truth: test/IHC or data/BCI/groundtruth/; falls back to val split.
 """
 
 import argparse
@@ -282,6 +282,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name under data/ (e.g. BCI, her2match). Overrides config root_dir.")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if args.dataset:
+        cfg["data"]["root_dir"] = f"data/{args.dataset}"
     evaluate(cfg, args.checkpoint)

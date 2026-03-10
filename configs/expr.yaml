@@ -1,5 +1,5 @@
 data:
-  root_dir: "data/raw"
+  root_dir: "data/BCI" #default dataset
   image_size: 256
   val_image_size: 512
   train_crops_per_image: 1
@@ -44,7 +44,6 @@ training:
   gan_label_gen: 1.0
   checkpoint_dir: "outputs/expr"
   resume: null
-
 expression:
   enabled: true
   lambda_expr: 2.2
@@ -61,7 +60,7 @@ expression:
   max_rel_term: 5.0
   dab_nonnegative: "softplus"
   softplus_beta: 8.0
-  stain_reference_mode: "batch_median"
+  stain_reference_mode: "batch_avg"
   stain_ref_blend: 0.25
   stain_min_ref_images: 6
 

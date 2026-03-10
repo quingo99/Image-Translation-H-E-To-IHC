@@ -5,8 +5,7 @@ dist/
 build/
 
 # Data
-data/raw/
-data/processed/
+data
 
 # Output
 outputs/base

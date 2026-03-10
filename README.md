@@ -135,8 +135,8 @@ data/<name>/
 |---|---|
 | `generator_best.pth` | Best value of `training.best_metric` |
 | `generator_best_psnr.pth` | Best PSNR (when not the primary metric) |
-| `generator_best_lpips.pth` | Best LPIPS (when not the primary metric) |
-| `generator_best_expr.pth` | Best expression score (when not the primary metric) |
+| `generator_best_lpips.pth` | Best LPIPS|
+| `generator_best_expr.pth` | Best expression score|
 | `generator_final.pth` | End of training |
 | `checkpoint_epoch_NNN.pth` | Every `training.save_every` epochs (full state for resuming) |
 
@@ -164,7 +164,7 @@ outputs/<model>/run_NNN/
 Metrics columns in the CSV:
 
 | Column | Description |
-|---|---|
+|--------|-------------|
 | `psnr` | Peak signal-to-noise ratio (dB, higher is better) |
 | `ssim` | Structural similarity (higher is better) |
 | `lpips` | Perceptual distance via AlexNet (lower is better) |
